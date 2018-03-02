@@ -9,6 +9,7 @@ void PWMInit();
 void IOInit();
 
 void readEEPROM();
+void saveDAC_set();
 
 void hotLoop();
 void sleepLoop();
@@ -25,8 +26,9 @@ uint DAC_in = 0;
 uint DAC_set;
 uchar DAC_setL = 0;
 uint DAC_tag = 0; //Real DAC target
-#define ADDR_DAC_SETH 0
-#define ADDR_DAC_SETL 0
+#define ADDR_DAC_SETH 0x00
+#define ADDR_DAC_MAPH 0x01
+uchar DAC_addrL = 0;
 
 uint sleepCount = 0;
 uchar sleepFlash = 0;
@@ -81,8 +83,7 @@ void main()
 			if (sleepCount > SLEEP_SEC)
 			{
 				EEPROM_enable();
-				EEPROM_clrWrtByte(ADDR_DAC_SETH, ADDR_DAC_SETL, getU16H(DAC_set));
-				EEPROM_writeNextByte(getU16L(DAC_set));
+				saveDAC_set();
 				EEPROM_disable();
 				DAC_setL = DAC_set;
 			}
@@ -90,8 +91,23 @@ void main()
 	}
 }
 
+void saveDAC_set()
+{
+	//Save DAC_set
+	EEPROM_writeByte(ADDR_DAC_MAPH, DAC_addrL, 0x5F);
+	DAC_addrL += 2;
+	if (DAC_addrL == 0)
+	{
+		EEPROM_clrWrtByte(ADDR_DAC_MAPH, 0, 0xFA);
+	}
+	EEPROM_writeByte(ADDR_DAC_SETH, DAC_addrL, getU16H(DAC_set));
+	EEPROM_writeNextByte(getU16L(DAC_set));
+	EEPROM_writeByte(ADDR_DAC_MAPH, DAC_addrL, 0xFA);
+}
+
 void readEEPROM()
 {
+	uchar buf;
 	//Read eeprom:
 	EEPROM_enable();
 	// EEPROM_setAddr(ADDR_DAC_SETH, ADDR_DAC_SETL);
@@ -100,28 +116,45 @@ void readEEPROM()
 	// EEPROM_addAddr();
 	// EEPROM_operate(EEPROM_CMD_READ);
 	// getU16L(DAC_set) = IAP_DATA;
-	EEPROM_readByte(ADDR_DAC_SETH, ADDR_DAC_SETL, getU16H(DAC_set));
-	EEPROM_readNextByte(getU16L(DAC_set));
-	DAC_setL = getU16L(DAC_set);
+	EEPROM_readByte(ADDR_DAC_MAPH, 0, buf);
+	TI = 0;
+	while (1)
+	{
+		if (buf == 0x5A)
+		{
+			//Jump
+			IAP_ADDRL += 2; //Add uint size
+			//Check if its over
+			if (IAP_ADDRL == 0)
+			{
+				EEPROM_clrWrtByte(ADDR_DAC_MAPH, 0, 0xFA);
+				break;
+			}
+			EEPROM_operate(EEPROM_CMD_READ);
+			buf = IAP_DATA;
+		}
+		else if (buf == 0xFA)
+		{
+			DAC_addrL = IAP_ADDRL;
+			EEPROM_readByte(ADDR_DAC_SETH, DAC_addrL, getU16H(DAC_set));
+			EEPROM_readNextByte(getU16L(DAC_set));
+			DAC_setL = getU16L(DAC_set);
+			break;
+		}
+		else
+		{
+			EEPROM_clrWrtByte(ADDR_DAC_MAPH, 0, 0xFA);
+			break;
+		}
+	}
 
 	//Check DAC_set
 	if (DAC_set > 1024)
 	{
 		DAC_set = 0;
-		//Save DAC_set
-		EEPROM_clrWrtByte(ADDR_DAC_SETH, ADDR_DAC_SETL, getU16H(DAC_set));
-		EEPROM_writeNextByte(getU16L(DAC_set));
+		saveDAC_set();
 	}
-	//test
-	TI = 0;
-	SBUF = getU16H(DAC_set);
-	while (!TI)
-		;
-	TI = 0;
-	SBUF = getU16L(DAC_set);
-	while (!TI)
-		;
-	TI = 0;
+	DAC_setL = DAC_set;
 	EEPROM_disable();
 }
 
