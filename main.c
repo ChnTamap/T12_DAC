@@ -1,4 +1,5 @@
 #include "main.h"
+#include "eeprom.h"
 
 void Timer0Init();
 void Timer1Init();
@@ -6,6 +7,8 @@ void ADCInit();
 void UartInit();
 void PWMInit();
 void IOInit();
+
+void readEEPROM();
 
 void hotLoop();
 void sleepLoop();
@@ -19,11 +22,19 @@ ADC_INDEX:
 uchar ADC_index = 0;
 
 uint DAC_in = 0;
-uint DAC_set = 0;
+uint DAC_set;
+uchar DAC_setL = 0;
 uint DAC_tag = 0; //Real DAC target
+#define ADDR_DAC_SETH 0
+#define ADDR_DAC_SETL 0
 
-bit skeFlag;  //Flag of shake switch
-bit skeFlagL; //Last Flag
+uint sleepCount = 0;
+uchar sleepFlash = 0;
+#define SLEEP_END 9155  //600,000,000/65536=9155.2734
+#define SLEEP_HALF 1831 //120,000,000/65536=1831.0546
+#define SLEEP_SEC 15	//1,000,000/65536=15.2587
+bit skeFlag;			//Flag of shake switch
+bit skeFlagL;			//Last Flag
 
 bit hotFlag;
 uchar index = 0;
@@ -57,6 +68,7 @@ void main()
 	UartInit();
 	PWMInit();
 	NumberLED();
+	readEEPROM();
 
 	EA = 1;
 	while (1)
@@ -64,7 +76,53 @@ void main()
 		numToLED(DAC_set);
 		if (skeFlag)
 			NumberLED_Num[3] |= 0x80;
+		if (getU16L(DAC_set) != DAC_setL)
+		{
+			if (sleepCount > SLEEP_SEC)
+			{
+				EEPROM_enable();
+				EEPROM_clrWrtByte(ADDR_DAC_SETH, ADDR_DAC_SETL, getU16H(DAC_set));
+				EEPROM_writeNextByte(getU16L(DAC_set));
+				EEPROM_disable();
+				DAC_setL = DAC_set;
+			}
+		}
 	}
+}
+
+void readEEPROM()
+{
+	//Read eeprom:
+	EEPROM_enable();
+	// EEPROM_setAddr(ADDR_DAC_SETH, ADDR_DAC_SETL);
+	// EEPROM_operate(EEPROM_CMD_READ);
+	// getU16H(DAC_set) = IAP_DATA;
+	// EEPROM_addAddr();
+	// EEPROM_operate(EEPROM_CMD_READ);
+	// getU16L(DAC_set) = IAP_DATA;
+	EEPROM_readByte(ADDR_DAC_SETH, ADDR_DAC_SETL, getU16H(DAC_set));
+	EEPROM_readNextByte(getU16L(DAC_set));
+	DAC_setL = getU16L(DAC_set);
+
+	//Check DAC_set
+	if (DAC_set > 1024)
+	{
+		DAC_set = 0;
+		//Save DAC_set
+		EEPROM_clrWrtByte(ADDR_DAC_SETH, ADDR_DAC_SETL, getU16H(DAC_set));
+		EEPROM_writeNextByte(getU16L(DAC_set));
+	}
+	//test
+	TI = 0;
+	SBUF = getU16H(DAC_set);
+	while (!TI)
+		;
+	TI = 0;
+	SBUF = getU16L(DAC_set);
+	while (!TI)
+		;
+	TI = 0;
+	EEPROM_disable();
 }
 
 /*
@@ -150,15 +208,17 @@ void hotLoop()
 		sleepLoop();
 	}
 	else
+	{
 		LED_r = Hot_out = 0;
+		if (TF1)
+		{
+			TF1 = 0;
+			sleepCount++;
+		}
+	}
 }
 
-uint sleepCount = 0;
-uchar sleepFlash = 0;
-#define SLEEP_END 9155  //600,000,000/65536=9155.2734
-#define SLEEP_HALF 1831 //120,000,000/65536=1831.0546
-#define SLEEP_SEC 15	//1,000,000/65536=15.2587
-void sleepLoop()		//Sleep
+void sleepLoop() //Sleep
 {
 	if (TF1)
 	{
@@ -193,7 +253,7 @@ void sleepLoop()		//Sleep
 	}
 }
 
-bit sP = 0, sN = 0, fP = 0, fN = 0, sSW = 0, fSW = 0;
+bit _sP = 0, _sN = 0, fP = 0, fN = 0, _sSW = 0, fSW = 0;
 void KeyTest()
 {
 	key[0] <<= 1;
@@ -205,14 +265,14 @@ void KeyTest()
 	key[2] <<= 1;
 	key[2] |= IO_SW;
 
-	sP = !key[0];
-	sN = !key[1];
-	sSW = !key[2];
+	_sP = !key[0];
+	_sN = !key[1];
+	_sSW = !key[2];
 
-	if (sP)
+	if (_sP)
 	{
 		if (!fN)
-			if (sN)
+			if (_sN)
 			{
 				DAC_set += 4;
 				sleepCount = 0;
@@ -221,10 +281,10 @@ void KeyTest()
 			DAC_set = 1024;
 	}
 
-	if (sN)
+	if (_sN)
 	{
 		if (!fP)
-			if (sP)
+			if (_sP)
 			{
 				sleepCount = 0;
 				DAC_set -= 4;
@@ -234,7 +294,7 @@ void KeyTest()
 	}
 
 	//sw
-	if (!sSW)
+	if (!_sSW)
 	{
 		if (fSW)
 		{
@@ -244,9 +304,9 @@ void KeyTest()
 		}
 	}
 
-	fSW = sSW;
-	fP = sP;
-	fN = sN;
+	fSW = _sSW;
+	fP = _sP;
+	fN = _sN;
 }
 
 void PWMInit()
@@ -326,7 +386,8 @@ void UartInterrupt() interrupt 4
 			reCount = 10;
 
 		DAC_set = buf * 4;
+		sleepCount = 0;
 		SBUF = DAC_in >> 2;
 	}
-	TI = 0;
+	// TI = 0;
 }
